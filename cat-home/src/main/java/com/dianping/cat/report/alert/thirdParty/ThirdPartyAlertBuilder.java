@@ -1,7 +1,11 @@
 package com.dianping.cat.report.alert.thirdParty;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.List;
 
+import com.dianping.cat.home.alert.thirdparty.entity.Socket;
 import org.codehaus.plexus.util.StringUtils;
 import org.unidal.helper.Threads;
 import org.unidal.helper.Threads.Task;
@@ -38,6 +42,12 @@ public class ThirdPartyAlertBuilder implements Task, LogEnabled {
 				Threads.forGroup("cat").start(new HttpReconnector(this, http, current + DURATION));
 			}
 		}
+		List<Socket> sockets = m_configManager.querSockets();
+		for (Socket socket : sockets) {
+			if (!connectSocket(socket)) {
+				Threads.forGroup("cat").start(new SocketReconnector(this, socket, current + DURATION));
+			}
+		}
 	}
 
 	public ThirdPartyAlertEntity buildAlertEntity(Http http) {
@@ -48,6 +58,13 @@ public class ThirdPartyAlertBuilder implements Task, LogEnabled {
 		String details = "HTTP URL[" + url + "?" + buildPars(pars) + "] " + type.toUpperCase() + "访问出现异常";
 
 		entity.setDomain(http.getDomain()).setType(type).setDetails(details);
+		return entity;
+	}
+
+	public ThirdPartyAlertEntity buildAlertEntity(Socket socket) {
+		ThirdPartyAlertEntity entity = new ThirdPartyAlertEntity();
+		String details = "[" + socket.getIp() + ":" + socket.getPort() + "]访问出现异常";
+		entity.setDomain(socket.getDomain()).setType("telnet").setDetails(details);
 		return entity;
 	}
 
@@ -81,6 +98,27 @@ public class ThirdPartyAlertBuilder implements Task, LogEnabled {
 			result = m_httpConnector.readFromPost(url, joined);
 		}
 		return result;
+	}
+
+
+	public boolean connectSocket(Socket socket) {
+		java.net.Socket client = null;
+		try {
+			client = new java.net.Socket();
+			SocketAddress address = new InetSocketAddress(socket.getIp(), socket.getPort());
+			client.connect(address,2000);
+			return true;
+		} catch (Exception e) {
+			return false;
+		} finally {
+			if (client != null) {
+				try {
+					client.close();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+		}
 	}
 
 	@Override
@@ -167,6 +205,53 @@ public class ThirdPartyAlertBuilder implements Task, LogEnabled {
 					}
 				} else {
 					m_alertTask.putAlertEnity(m_alertTask.buildAlertEntity(m_http));
+					break;
+				}
+			}
+		}
+
+		@Override
+		public void shutdown() {
+		}
+	}
+
+
+	public class SocketReconnector implements Task {
+
+		private ThirdPartyAlertBuilder m_alertTask;
+
+		private int m_retryTimes = 2;
+
+		private Socket m_socket;
+
+		private long m_deadLine;
+
+		public SocketReconnector(ThirdPartyAlertBuilder alertTask, Socket socket, long deadLine) {
+			m_socket = socket;
+			m_alertTask = alertTask;
+			m_deadLine = deadLine;
+		}
+
+		@Override
+		public String getName() {
+			return "socket-reconnector";
+		}
+
+		@Override
+		public void run() {
+			while (true) {
+				if (m_retryTimes > 0 && System.currentTimeMillis() < m_deadLine) {
+					m_retryTimes--;
+					if (m_alertTask.connectSocket(m_socket)) {
+						break;
+					} else {
+						try {
+							Thread.sleep(5000);
+						} catch (InterruptedException e) {
+						}
+					}
+				} else {
+					m_alertTask.putAlertEnity(m_alertTask.buildAlertEntity(m_socket));
 					break;
 				}
 			}
